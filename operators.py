@@ -1,6 +1,3 @@
-"""
-ALNS 破坏与修复算子，修复 Regret-2 的 inf 问题
-"""
 import random
 from evaluator import evaluate_route, heuristic_departure
 from config import VEHICLE_TYPES
@@ -20,13 +17,12 @@ def random_removal(routes, num_remove):
     routes = [r for r in routes if len(r['customers']) > 0]
     return routes, removed
 
-
 def worst_removal(routes, num_remove, customers, dist):
     savings = []
     for ri, r in enumerate(routes):
         vtype = r['vtype']
         for ci, c in enumerate(r['customers']):
-            route_without = r['customers'][:ci] + r['customers'][ci + 1:]
+            route_without = r['customers'][:ci] + r['customers'][ci+1:]
             if not route_without:
                 dep = heuristic_departure(r['customers'], vtype, customers, dist)
                 cost_with, _ = evaluate_route(r['customers'], vtype, dep, customers, dist)
@@ -39,7 +35,6 @@ def worst_removal(routes, num_remove, customers, dist):
                 savings.append((ri, ci, c, cost_before - cost_after))
     savings.sort(key=lambda x: x[3], reverse=True)
 
-    # 选出要移除的客户（不重复）
     remove_set = set()
     for _, _, c, _ in savings:
         if len(remove_set) >= num_remove:
@@ -47,18 +42,15 @@ def worst_removal(routes, num_remove, customers, dist):
         if c not in remove_set:
             remove_set.add(c)
 
-    # 重建路径：过滤掉被移除的客户
     new_routes = []
     removed = []
     for r in routes:
-        # 保留未被移除的客户
         remaining = [c for c in r['customers'] if c not in remove_set]
         if remaining:
-            new_routes.append({'vtype': r['vtype'], 'customers': remaining})
-        # 记录被移除的客户（从该路径移除的）
+            new_routes.append({'vtype': r['vtype'], 'customers': remaining,
+                               'fixed_depart': r.get('fixed_depart')})
         removed_in_this_route = [c for c in r['customers'] if c in remove_set]
         removed.extend(removed_in_this_route)
-
     return new_routes, removed
 
 def _can_serve(vtype, cust):
@@ -69,6 +61,7 @@ def _can_serve(vtype, cust):
     return not (ready < 0 and due < 0)
 
 def greedy_insert(routes, removed_custs, customers, dist):
+    # 统计当前各车型使用数量
     type_count = {vtype.id: 0 for vtype in VEHICLE_TYPES}
     for r in routes:
         type_count[r['vtype'].id] += 1
@@ -76,10 +69,13 @@ def greedy_insert(routes, removed_custs, customers, dist):
     for c in removed_custs:
         best_delta = float('inf')
         best_dest = None
+        # 尝试插入已有路径
         for ri, r in enumerate(routes):
             vtype = r['vtype']
             cust = customers[c-1]
             if not _can_serve(vtype, cust):
+                continue
+            if c in r['customers']:
                 continue
             for pos in range(len(r['customers'])+1):
                 new_route = r['customers'][:pos] + [c] + r['customers'][pos:]
@@ -91,17 +87,19 @@ def greedy_insert(routes, removed_custs, customers, dist):
                 cost_before, _ = evaluate_route(r['customers'], vtype, dep_before, customers, dist) if r['customers'] else (0, None)
                 dep_after = heuristic_departure(new_route, vtype, customers, dist)
                 cost_after, _ = evaluate_route(new_route, vtype, dep_after, customers, dist)
-                if cost_after >= 1e12:   # 不可行则跳过
+                if cost_after >= 1e12:
                     continue
                 delta = cost_after - (cost_before if r['customers'] else vtype.start_cost)
                 if delta < best_delta:
                     best_delta = delta
                     best_dest = ('existing', ri, pos)
+
+        # 尝试新建路径（必须遵守数量限制）
         for tid, vtype in enumerate(VEHICLE_TYPES):
             cust = customers[c-1]
             if not _can_serve(vtype, cust):
                 continue
-            if type_count.get(vtype.id, 0) >= vtype.count:
+            if type_count.get(vtype.id, 0) >= vtype.count:   # 没有可用车辆了
                 continue
             if cust['demand_weight'] > vtype.cap_weight or cust['demand_volume'] > vtype.cap_volume:
                 continue
@@ -113,22 +111,11 @@ def greedy_insert(routes, removed_custs, customers, dist):
             if cost_new < best_delta:
                 best_delta = cost_new
                 best_dest = ('new', tid)
+
         if best_dest is None:
-            # 忽略数量限制尝试插入
-            for tid, vtype in enumerate(VEHICLE_TYPES):
-                if _can_serve(vtype, customers[c-1]) and \
-                   customers[c-1]['demand_weight'] <= vtype.cap_weight and \
-                   customers[c-1]['demand_volume'] <= vtype.cap_volume:
-                    # 再次检查 cost_new
-                    new_route = [c]
-                    dep_new = heuristic_departure(new_route, vtype, customers, dist)
-                    cost_new, _ = evaluate_route(new_route, vtype, dep_new, customers, dist)
-                    if cost_new >= 1e12:
-                        continue
-                    best_dest = ('new', tid)
-                    break
-            if best_dest is None:
-                continue
+            # 无法插入，该客户保持未分配，交由后续迭代解决
+            continue
+
         if best_dest[0] == 'new':
             vtype = VEHICLE_TYPES[best_dest[1]]
             routes.append({'vtype': vtype, 'customers': [c]})
@@ -153,6 +140,8 @@ def regret2_insert(routes, removed_custs, customers, dist):
                 cust = customers[c-1]
                 if not _can_serve(vtype, cust):
                     continue
+                if c in r['customers']:
+                    continue
                 for pos in range(len(r['customers'])+1):
                     new_route = r['customers'][:pos] + [c] + r['customers'][pos:]
                     w = sum(customers[x-1]['demand_weight'] for x in new_route)
@@ -169,7 +158,7 @@ def regret2_insert(routes, removed_custs, customers, dist):
                         continue
                     delta = cost_after - base
                     best_vals.append((delta, ('existing', ri, pos)))
-            # 新建路径
+            # 新建路径（遵守数量限制）
             for tid, vtype in enumerate(VEHICLE_TYPES):
                 cust = customers[c-1]
                 if not _can_serve(vtype, cust):
@@ -191,7 +180,7 @@ def regret2_insert(routes, removed_custs, customers, dist):
                 regret = best_vals[0][0]
             else:
                 regret = float('inf')
-            if best_vals:                 # 有可行插入则记录
+            if best_vals:
                 regrets.append((c, best_vals[0][1], regret))
         if not regrets:
             break

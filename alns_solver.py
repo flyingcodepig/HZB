@@ -5,7 +5,7 @@ import random
 import math
 from copy import deepcopy
 from config import VEHICLE_TYPES
-from evaluator import evaluate_route, evaluate_solution,heuristic_departure
+from evaluator import evaluate_route, evaluate_solution, heuristic_departure
 from operators import random_removal, worst_removal, greedy_insert, regret2_insert
 
 OPERATORS_DESTROY = ['random_removal', 'worst_removal']
@@ -68,7 +68,6 @@ def construct_initial_solution(customers, dist):
                 inserted = True
                 break
         if not inserted:
-            # 尝试插入现有电动路径
             best_insert = None
             best_cost = float('inf')
             for ri, r in enumerate(routes):
@@ -90,16 +89,6 @@ def construct_initial_solution(customers, dist):
             if best_insert:
                 ri, pos = best_insert
                 routes[ri]['customers'].insert(pos, cid)
-            else:
-                # 后备：用电动车型新建，忽略数量限制
-                for tid in electric_order:
-                    vtype = VEHICLE_TYPES[tid]
-                    if customers[cid-1]['demand_weight'] <= vtype.cap_weight and \
-                       customers[cid-1]['demand_volume'] <= vtype.cap_volume:
-                        routes.append({'vtype': vtype, 'customers': [cid]})
-                        break
-                else:
-                    routes.append({'vtype': VEHICLE_TYPES[0], 'customers': [cid]})
 
     # 常规贪心构造
     order = [3, 0, 1, 4, 2]
@@ -148,35 +137,24 @@ def construct_initial_solution(customers, dist):
         unassigned -= set(best_route)
         available[best_vtype.id] -= 1
 
-    # 后备
     if unassigned:
-        print(f"警告: 贪心构造后有 {len(unassigned)} 个客户未分配，使用单客户路径后备。")
-        for c in unassigned:
-            assigned = False
-            for tid in order:
-                vtype = VEHICLE_TYPES[tid]
-                if _can_serve(vtype, customers[c-1]) and \
-                   customers[c-1]['demand_weight'] <= vtype.cap_weight and \
-                   customers[c-1]['demand_volume'] <= vtype.cap_volume:
-                    routes.append({'vtype': vtype, 'customers': [c]})
-                    assigned = True
-                    break
-            if not assigned:
-                vtype = VEHICLE_TYPES[3] if customers[c-1]['demand_weight'] <= 3000 and \
-                        customers[c-1]['demand_volume'] <= 15.0 else VEHICLE_TYPES[0]
-                routes.append({'vtype': vtype, 'customers': [c]})
+        print(f"警告: 贪心构造后有 {len(unassigned)} 个客户未分配，将交由 ALNS 尝试插入。")
     return routes
 
-def alns_solve(customers, dist, max_iter=500, init_temp=100, cooling_rate=0.9995,
+
+def alns_solve(customers, dist, max_iter=2000, init_temp=100, cooling_rate=0.9995,
                num_remove_min=1, num_remove_ratio=0.15):
     routes = construct_initial_solution(customers, dist)
-    current_cost, _ = evaluate_solution(routes, customers, dist)
+    current_cost, _, cur_feasible = evaluate_solution(routes, customers, dist)
     best_routes = deepcopy(routes)
     best_cost = current_cost
+    best_feasible = cur_feasible
     T = init_temp
     num_remove_max = max(1, int(len(customers)*num_remove_ratio))
 
-    print(f"初始解成本: {current_cost:.2f}, 使用车辆: {len(routes)}")
+    if not cur_feasible:
+        print(f"初始解不合规 (成本: {current_cost:.2f})，将通过探索寻找合规解...")
+
     for it in range(max_iter):
         destroy_op = select_operator(OPERATORS_DESTROY)
         repair_op = select_operator(OPERATORS_REPAIR)
@@ -194,10 +172,13 @@ def alns_solve(customers, dist, max_iter=500, init_temp=100, cooling_rate=0.9995
         else:
             new_routes = regret2_insert(new_routes, removed, customers, dist)
 
-        new_cost, _ = evaluate_solution(new_routes, customers, dist)
+        new_cost, _, new_feasible = evaluate_solution(new_routes, customers, dist)
         improvement = current_cost - new_cost
         accept = False
-        if new_cost < current_cost:
+        # 合规解总是优先接受
+        if new_feasible and not cur_feasible:
+            accept = True
+        elif new_cost < current_cost:
             accept = True
         elif T > 0.01 and random.random() < math.exp(improvement / T):
             accept = True
@@ -205,13 +186,18 @@ def alns_solve(customers, dist, max_iter=500, init_temp=100, cooling_rate=0.9995
         if accept:
             routes = new_routes
             current_cost = new_cost
+            cur_feasible = new_feasible
             update_weights(destroy_op, repair_op, max(0, improvement))
-            if new_cost < best_cost:
+            # 只有合规解才能成为全局最优
+            if new_feasible and (not best_feasible or new_cost < best_cost):
                 best_routes = deepcopy(new_routes)
                 best_cost = new_cost
+                best_feasible = True
+
         T *= cooling_rate
+        if it % 10 == 0:
+            print(f"  Iter {it}: curr={current_cost:.2f} (合规:{cur_feasible}), best={best_cost:.2f} (合规:{best_feasible}), T={T:.3f}")
 
-        if it % 50 == 0:
-            print(f"  Iter {it}: curr={current_cost:.2f}, best={best_cost:.2f}, T={T:.3f}")
-
+    if not best_feasible:
+        print("警告：未能找到完全合规的解，请增加迭代次数。")
     return best_routes, best_cost

@@ -1,7 +1,3 @@
-"""
-评估单条路径及完整方案的成本，包含出发时间优化
-修正：使用计数器检查每个客户恰好被服务一次，避免重复服务漏洞
-"""
 import numpy as np
 from scipy.optimize import minimize_scalar
 from config import WAIT_COST_PER_HOUR, TARDY_COST_PER_HOUR, VEHICLE_TYPES, RESTRICTED_END
@@ -52,7 +48,6 @@ def evaluate_route(route_custs, vtype, depart_time, customers, dist):
             if ready < 0 and due < 0:
                 return float('inf'), None
 
-            # 绿区限行检查：燃油车到达绿区客户的时刻必须 >= 16:00
             if vtype.fuel_type == 'fuel' and cust.get('is_green_zone', False):
                 if t < RESTRICTED_END:
                     return float('inf'), None
@@ -85,7 +80,14 @@ def evaluate_route(route_custs, vtype, depart_time, customers, dist):
         'departure_time': depart_time
     }
 
-def optimize_departure_time(route_custs, vtype, customers, dist):
+def optimize_departure_time(route_custs, vtype, customers, dist, fixed_dep=None):
+    if fixed_dep is not None:
+        cost, details = evaluate_route(route_custs, vtype, fixed_dep, customers, dist)
+        if details is None:
+            return float('inf'), None, None
+        details['departure_time'] = fixed_dep
+        return cost, fixed_dep, details
+
     def f(dep):
         c, _ = evaluate_route(route_custs, vtype, dep, customers, dist)
         return c if c < float('inf') else 1e12
@@ -107,21 +109,22 @@ def optimize_departure_time(route_custs, vtype, customers, dist):
     return best_cost, res.x, details
 
 def evaluate_solution(routes, customers, dist):
-    # 1. 客户覆盖完整性检查（每个客户恰好被服务一次）
+    """
+    返回 (total_cost, route_details, feasible)
+    feasible: True 当且仅当所有客户被覆盖一次、容量合规、车辆数量合规。
+    total_cost 包含针对车辆超限的巨额罚款（若存在超限），否则仅包含实际运营成本。
+    """
+    # 客户覆盖检查（硬约束）
     visit_count = {}
     for r in routes:
         for cid in r['customers']:
             visit_count[cid] = visit_count.get(cid, 0) + 1
-    all_ids = set(c['id'] for c in customers)
+    all_ids = set(c['id'] for c in customers if not c.get('is_depot', False))
     for cid in all_ids:
         if visit_count.get(cid, 0) != 1:
-            return float('inf'), None
-    # 额外检查是否有不属于任何客户的 ID（防御性）
-    for cid in visit_count:
-        if cid not in all_ids:
-            return float('inf'), None
+            return float('inf'), None, False   # 无法立刻变为有限值，仍需拒绝
 
-    # 2. 容量检查与车辆数统计
+    # 车型统计与容量检查
     type_count = {vtype.id: 0 for vtype in VEHICLE_TYPES}
     for r in routes:
         vtype = r['vtype']
@@ -130,22 +133,27 @@ def evaluate_solution(routes, customers, dist):
         w = sum(customers[c-1]['demand_weight'] for c in custs)
         v = sum(customers[c-1]['demand_volume'] for c in custs)
         if w > vtype.cap_weight + 1e-6 or v > vtype.cap_volume + 1e-6:
-            return float('inf'), None
+            return float('inf'), None, False
 
+    # 车辆数量软惩罚（超限每辆罚10万，但总成本仍为有限值）
     penalty_excess = 0.0
+    feasible = True
     for vtype in VEHICLE_TYPES:
         if type_count[vtype.id] > vtype.count:
             excess = type_count[vtype.id] - vtype.count
             penalty_excess += excess * 100000.0
+            feasible = False
 
+    # 计算各路径的实际运营成本
     total = 0.0
     route_details = []
     for r in routes:
         vtype = r['vtype']
         custs = r['customers']
-        cost, dep, det = optimize_departure_time(custs, vtype, customers, dist)
-        if det is None:                     # 不可行路径
-            return float('inf'), None
+        fixed_dep = r.get('fixed_depart', None)
+        cost, dep, det = optimize_departure_time(custs, vtype, customers, dist, fixed_dep)
+        if det is None:
+            return float('inf'), None, False
         total += cost
         det['vtype_name'] = vtype.name
         det['vtype'] = vtype
@@ -153,4 +161,4 @@ def evaluate_solution(routes, customers, dist):
         route_details.append(det)
 
     total += penalty_excess
-    return total, route_details
+    return total, route_details, feasible
