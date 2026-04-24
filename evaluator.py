@@ -1,5 +1,6 @@
 """
 评估单条路径及完整方案的成本，包含出发时间优化
+修正：使用计数器检查每个客户恰好被服务一次，避免重复服务漏洞
 """
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -91,7 +92,7 @@ def optimize_departure_time(route_custs, vtype, customers, dist):
 
     best_dep = 0.0
     best_val = float('inf')
-    for x in np.arange(0.0, 20.0 + 0.5, 0.5):   # 扩大到0~20小时
+    for x in np.arange(0.0, 20.0 + 0.5, 0.5):
         val = f(x)
         if val < best_val:
             best_val = val
@@ -106,13 +107,19 @@ def optimize_departure_time(route_custs, vtype, customers, dist):
     return best_cost, res.x, details
 
 def evaluate_solution(routes, customers, dist):
-    # 1. 客户覆盖完整性检查
-    covered = set()
+    # 1. 客户覆盖完整性检查（每个客户恰好被服务一次）
+    visit_count = {}
     for r in routes:
-        covered.update(r['customers'])
+        for cid in r['customers']:
+            visit_count[cid] = visit_count.get(cid, 0) + 1
     all_ids = set(c['id'] for c in customers)
-    if covered != all_ids:
-        return float('inf'), None
+    for cid in all_ids:
+        if visit_count.get(cid, 0) != 1:
+            return float('inf'), None
+    # 额外检查是否有不属于任何客户的 ID（防御性）
+    for cid in visit_count:
+        if cid not in all_ids:
+            return float('inf'), None
 
     # 2. 容量检查与车辆数统计
     type_count = {vtype.id: 0 for vtype in VEHICLE_TYPES}
