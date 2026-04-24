@@ -4,6 +4,8 @@
 """
 import sys
 import time
+import random
+import numpy as np
 from data_loader import load_and_preprocess
 from alns_solver import alns_solve
 from evaluator import optimize_departure_time
@@ -59,6 +61,8 @@ def print_solution(routes, customers, dist):
     print("="*80)
 
 if __name__ == "__main__":
+    random.seed(42)
+    np.random.seed(42)
     # 读取命令行参数，默认问题1
     if len(sys.argv) > 1:
         problem_id = int(sys.argv[1])
