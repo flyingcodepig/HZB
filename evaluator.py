@@ -1,6 +1,5 @@
 """
 评估单条路径及完整方案的成本，包含出发时间优化
-修正：绿区检查改为到达时间 < 16:00 则 inf
 """
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -44,7 +43,6 @@ def evaluate_route(route_custs, vtype, depart_time, customers, dist):
 
         if nxt != 0:
             cust = customers[nxt-1]
-            # 获取紧缩时间窗
             if vtype.fuel_type == 'fuel':
                 ready, due = cust.get('tw_fuel', (cust['ready_time'], cust['due_time']))
             else:
@@ -53,7 +51,7 @@ def evaluate_route(route_custs, vtype, depart_time, customers, dist):
             if ready < 0 and due < 0:
                 return float('inf'), None
 
-            # 绿区限行检查：燃油车到达绿区客户的时刻必须 >= 16:00 (RESTRICTED_END)
+            # 绿区限行检查：燃油车到达绿区客户的时刻必须 >= 16:00
             if vtype.fuel_type == 'fuel' and cust.get('is_green_zone', False):
                 if t < RESTRICTED_END:
                     return float('inf'), None
@@ -93,21 +91,30 @@ def optimize_departure_time(route_custs, vtype, customers, dist):
 
     best_dep = 0.0
     best_val = float('inf')
-    for x in np.arange(0.0, 10.0 + 0.5, 0.5):
+    for x in np.arange(0.0, 20.0 + 0.5, 0.5):   # 扩大到0~20小时
         val = f(x)
         if val < best_val:
             best_val = val
             best_dep = x
     lb = max(0.0, best_dep - 1.0)
-    ub = min(10.0, best_dep + 1.0)
+    ub = min(20.0, best_dep + 1.0)
     res = minimize_scalar(f, bounds=(lb, ub), method='bounded')
     best_cost, details = evaluate_route(route_custs, vtype, res.x, customers, dist)
+    if details is None:
+        return float('inf'), None, None
     details['departure_time'] = res.x
     return best_cost, res.x, details
 
 def evaluate_solution(routes, customers, dist):
-    total = 0.0
-    route_details = []
+    # 1. 客户覆盖完整性检查
+    covered = set()
+    for r in routes:
+        covered.update(r['customers'])
+    all_ids = set(c['id'] for c in customers)
+    if covered != all_ids:
+        return float('inf'), None
+
+    # 2. 容量检查与车辆数统计
     type_count = {vtype.id: 0 for vtype in VEHICLE_TYPES}
     for r in routes:
         vtype = r['vtype']
@@ -124,10 +131,14 @@ def evaluate_solution(routes, customers, dist):
             excess = type_count[vtype.id] - vtype.count
             penalty_excess += excess * 100000.0
 
+    total = 0.0
+    route_details = []
     for r in routes:
         vtype = r['vtype']
         custs = r['customers']
         cost, dep, det = optimize_departure_time(custs, vtype, customers, dist)
+        if det is None:                     # 不可行路径
+            return float('inf'), None
         total += cost
         det['vtype_name'] = vtype.name
         det['vtype'] = vtype

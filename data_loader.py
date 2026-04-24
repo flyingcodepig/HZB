@@ -44,11 +44,13 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
     df_coord = pd.read_excel(coord_path, sheet_name=0)
     coord_dict = {int(row['ID']): (row['X (km)'], row['Y (km)']) for _, row in df_coord.iterrows()}
 
-    # 5. 构建原始客户列表
+    # 5. 构建原始客户列表（跳过零需求客户）
     raw_customers = []
     for cid in range(1, 99):
         w = demand_agg.loc[cid, '重量'] if cid in demand_agg.index else 0
         v = demand_agg.loc[cid, '体积'] if cid in demand_agg.index else 0
+        if w <= 0 and v <= 0:
+            continue   # 跳过无需求客户
         tw = tw_dict.get(cid, (0.0, 24.0))
         raw_customers.append({
             'original_id': cid,
@@ -63,16 +65,6 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
     for cust in raw_customers:
         w = cust['demand_weight']
         v = cust['demand_volume']
-        if w <= 1e-6 and v <= 1e-6:
-            # 无需求，但保留一个副本（可选，或跳过）
-            # 此处保留原始客户但不上传需求（后续可以忽略）
-            new_cust = deepcopy(cust)
-            new_cust['demand_weight'] = 0.0
-            new_cust['demand_volume'] = 0.0
-            new_cust['id'] = f"{cust['original_id']}_1"
-            customers.append(new_cust)
-            continue
-
         k_w = math.ceil(w / MAX_WEIGHT) if w > 0 else 1
         k_v = math.ceil(v / MAX_VOLUME) if v > 0 else 1
         k = max(k_w, k_v)
@@ -117,7 +109,7 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
             if fuel_ready <= fuel_due:
                 tw_fuel = (fuel_ready, fuel_due)
             else:
-                tw_fuel = (-1.0, -1.0)   # 燃油车不可服务
+                tw_fuel = (-1.0, -1.0)
         else:
             tw_fuel = (orig_ready, orig_due)
 
