@@ -1,9 +1,9 @@
 """
 ALNS 使用的破坏（removal）与修复（insertion）算子
-包含问题2的车型-客户兼容性检查（绿色区限行）
+插入时使用启发式出发时间代替固定 0.0
 """
 import random
-from evaluator import evaluate_route
+from evaluator import evaluate_route, heuristic_departure
 from config import VEHICLE_TYPES
 
 def random_removal(routes, num_remove):
@@ -30,11 +30,15 @@ def worst_removal(routes, num_remove, customers, dist):
         for ci, c in enumerate(r['customers']):
             route_without = r['customers'][:ci] + r['customers'][ci+1:]
             if not route_without:
-                cost_with, _ = evaluate_route(r['customers'], vtype, 0.0, customers, dist)
+                # 计算最优出发时间下的原路径成本
+                dep = heuristic_departure(r['customers'], vtype, customers, dist)
+                cost_with, _ = evaluate_route(r['customers'], vtype, dep, customers, dist)
                 savings.append((ri, ci, c, cost_with - vtype.start_cost))
             else:
-                cost_before, _ = evaluate_route(r['customers'], vtype, 0.0, customers, dist)
-                cost_after, _ = evaluate_route(route_without, vtype, 0.0, customers, dist)
+                dep_before = heuristic_departure(r['customers'], vtype, customers, dist)
+                cost_before, _ = evaluate_route(r['customers'], vtype, dep_before, customers, dist)
+                dep_after = heuristic_departure(route_without, vtype, customers, dist)
+                cost_after, _ = evaluate_route(route_without, vtype, dep_after, customers, dist)
                 savings.append((ri, ci, c, cost_before - cost_after))
     savings.sort(key=lambda x: x[3], reverse=True)
     remove_set = set()
@@ -58,8 +62,7 @@ def _can_serve(vtype, cust):
     return not (ready < 0 and due < 0)
 
 def greedy_insert(routes, removed_custs, customers, dist):
-    """ 贪心插入法，跳过不兼容的车型 """
-    # 统计当前各车型使用数量
+    """ 贪心插入法，使用启发式出发时间评估成本 """
     type_count = {vtype.id: 0 for vtype in VEHICLE_TYPES}
     for r in routes:
         type_count[r['vtype'].id] += 1
@@ -78,8 +81,11 @@ def greedy_insert(routes, removed_custs, customers, dist):
                 vol = sum(customers[x-1]['demand_volume'] for x in new_route)
                 if w > vtype.cap_weight + 1e-6 or vol > vtype.cap_volume + 1e-6:
                     continue
-                cost_before, _ = evaluate_route(r['customers'], vtype, 0.0, customers, dist) if r['customers'] else (0, None)
-                cost_after, _ = evaluate_route(new_route, vtype, 0.0, customers, dist)
+                # 使用启发式出发时间评估
+                dep_before = heuristic_departure(r['customers'], vtype, customers, dist) if r['customers'] else 0.0
+                cost_before, _ = evaluate_route(r['customers'], vtype, dep_before, customers, dist) if r['customers'] else (0, None)
+                dep_after = heuristic_departure(new_route, vtype, customers, dist)
+                cost_after, _ = evaluate_route(new_route, vtype, dep_after, customers, dist)
                 delta = cost_after - (cost_before if r['customers'] else vtype.start_cost)
                 if delta < best_delta:
                     best_delta = delta
@@ -94,13 +100,13 @@ def greedy_insert(routes, removed_custs, customers, dist):
             if cust['demand_weight'] > vtype.cap_weight or cust['demand_volume'] > vtype.cap_volume:
                 continue
             new_route = [c]
-            cost_new, _ = evaluate_route(new_route, vtype, 0.0, customers, dist)
+            dep_new = heuristic_departure(new_route, vtype, customers, dist)
+            cost_new, _ = evaluate_route(new_route, vtype, dep_new, customers, dist)
             if cost_new < best_delta:
                 best_delta = cost_new
                 best_dest = ('new', tid)
         if best_dest is None:
-            # 极端情况：无法插入，强制新建一条允许的车型路径（即使超限也要尝试，会在评估时剔除）
-            # 寻找任一可服务的车型（忽略数量限制）
+            # 极端情况：尝试忽略数量限制找一个可服务车型
             for tid, vtype in enumerate(VEHICLE_TYPES):
                 if _can_serve(vtype, customers[c-1]) and \
                    customers[c-1]['demand_weight'] <= vtype.cap_weight and \
@@ -108,7 +114,7 @@ def greedy_insert(routes, removed_custs, customers, dist):
                     best_dest = ('new', tid)
                     break
             if best_dest is None:
-                continue   # 放弃该客户
+                continue
         if best_dest[0] == 'new':
             vtype = VEHICLE_TYPES[best_dest[1]]
             routes.append({'vtype': vtype, 'customers': [c]})
@@ -119,7 +125,7 @@ def greedy_insert(routes, removed_custs, customers, dist):
     return routes
 
 def regret2_insert(routes, removed_custs, customers, dist):
-    """ Regret-2 插入法，考虑兼容性 """
+    """ Regret-2 插入法，使用启发式出发时间 """
     type_count = {vtype.id: 0 for vtype in VEHICLE_TYPES}
     for r in routes:
         type_count[r['vtype'].id] += 1
@@ -140,8 +146,10 @@ def regret2_insert(routes, removed_custs, customers, dist):
                     vol = sum(customers[x-1]['demand_volume'] for x in new_route)
                     if w > vtype.cap_weight + 1e-6 or vol > vtype.cap_volume + 1e-6:
                         continue
-                    cost_after, _ = evaluate_route(new_route, vtype, 0.0, customers, dist)
-                    base = evaluate_route(r['customers'], vtype, 0.0, customers, dist)[0] if r['customers'] else vtype.start_cost
+                    dep_after = heuristic_departure(new_route, vtype, customers, dist)
+                    cost_after, _ = evaluate_route(new_route, vtype, dep_after, customers, dist)
+                    dep_before = heuristic_departure(r['customers'], vtype, customers, dist) if r['customers'] else 0.0
+                    base = evaluate_route(r['customers'], vtype, dep_before, customers, dist)[0] if r['customers'] else vtype.start_cost
                     delta = cost_after - base
                     best_vals.append((delta, ('existing', ri, pos)))
             # 新建路径
@@ -153,7 +161,9 @@ def regret2_insert(routes, removed_custs, customers, dist):
                     continue
                 if cust['demand_weight'] > vtype.cap_weight or cust['demand_volume'] > vtype.cap_volume:
                     continue
-                cost_new, _ = evaluate_route([c], vtype, 0.0, customers, dist)
+                new_route = [c]
+                dep_new = heuristic_departure(new_route, vtype, customers, dist)
+                cost_new, _ = evaluate_route(new_route, vtype, dep_new, customers, dist)
                 best_vals.append((cost_new, ('new', tid)))
             best_vals.sort(key=lambda x: x[0])
             if len(best_vals) >= 2:
