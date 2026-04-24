@@ -5,7 +5,7 @@ import random
 import math
 from copy import deepcopy
 from config import VEHICLE_TYPES
-from evaluator import evaluate_route, evaluate_solution
+from evaluator import evaluate_route, evaluate_solution,heuristic_departure
 from operators import random_removal, worst_removal, greedy_insert, regret2_insert
 
 OPERATORS_DESTROY = ['random_removal', 'worst_removal']
@@ -41,52 +41,49 @@ def _can_serve(vtype, cust):
 
 
 def construct_initial_solution(customers, dist):
-    """ 带必须新能源客户优先分配和后备的初始解构造 """
     available = {tid: vtype.count for tid, vtype in enumerate(VEHICLE_TYPES)}
     routes = []
-    unassigned = set(range(1, len(customers) + 1))
+    unassigned = set(range(1, len(customers)+1))
 
-    # 识别必须由新能源服务的客户（绿区，且 tw_fuel 为 (-1,-1)）
+    # 识别必须电动客户
     must_electric = []
     for cid in unassigned.copy():
-        cust = customers[cid - 1]
+        cust = customers[cid-1]
         tf = cust.get('tw_fuel')
-        if tf and tf[0] < 0 and tf[1] < 0:  # 燃油车不可服务
+        if tf and tf[0] < 0 and tf[1] < 0:
             must_electric.append(cid)
-            unassigned.remove(cid)  # 临时移出，稍后统一分配
+            unassigned.remove(cid)
 
-    # 用新能源车优先装载 must_electric 客户
-    electric_order = [3, 4]  # 电动3000, 电动1250
+    electric_order = [3, 4]
     for cid in must_electric:
         inserted = False
         for tid in electric_order:
             if available[tid] == 0:
                 continue
             vtype = VEHICLE_TYPES[tid]
-            if customers[cid - 1]['demand_weight'] <= vtype.cap_weight and \
-                    customers[cid - 1]['demand_volume'] <= vtype.cap_volume:
-                # 新建一条只含此客户的路径（绿色区客户可能时间窗特殊，单独一车可灵活调整出发时间）
+            if customers[cid-1]['demand_weight'] <= vtype.cap_weight and \
+               customers[cid-1]['demand_volume'] <= vtype.cap_volume:
                 routes.append({'vtype': vtype, 'customers': [cid]})
                 available[tid] -= 1
                 inserted = True
                 break
         if not inserted:
-            # 尝试插入现有新能源车路径
+            # 尝试插入现有电动路径
             best_insert = None
             best_cost = float('inf')
             for ri, r in enumerate(routes):
                 vtype = r['vtype']
                 if vtype.fuel_type != 'electric':
                     continue
-                cust = customers[cid - 1]
-                w = sum(customers[c - 1]['demand_weight'] for c in r['customers']) + cust['demand_weight']
-                v = sum(customers[c - 1]['demand_volume'] for c in r['customers']) + cust['demand_volume']
+                cust = customers[cid-1]
+                w = sum(customers[c-1]['demand_weight'] for c in r['customers']) + cust['demand_weight']
+                v = sum(customers[c-1]['demand_volume'] for c in r['customers']) + cust['demand_volume']
                 if w > vtype.cap_weight or v > vtype.cap_volume:
                     continue
-                # 尝试所有插入位置，选最优
-                for pos in range(len(r['customers']) + 1):
+                for pos in range(len(r['customers'])+1):
                     new_route = r['customers'][:pos] + [cid] + r['customers'][pos:]
-                    cost, _ = evaluate_route(new_route, vtype, 0.0, customers, dist)
+                    dep = heuristic_departure(new_route, vtype, customers, dist)
+                    cost, _ = evaluate_route(new_route, vtype, dep, customers, dist)
                     if cost < best_cost:
                         best_cost = cost
                         best_insert = (ri, pos)
@@ -94,32 +91,24 @@ def construct_initial_solution(customers, dist):
                 ri, pos = best_insert
                 routes[ri]['customers'].insert(pos, cid)
             else:
-                # 无法插入，尝试用非电动车型？不该发生，因为 must_electric 定义就是燃油不可服务
-                # 退而求其次，强行用电动3000车型（如果满，忽略数量限制）
-                # 只要可用数量总和允许，我们选择一种电动车型新建
+                # 后备：用电动车型新建，忽略数量限制
                 for tid in electric_order:
                     vtype = VEHICLE_TYPES[tid]
-                    if customers[cid - 1]['demand_weight'] <= vtype.cap_weight and \
-                            customers[cid - 1]['demand_volume'] <= vtype.cap_volume:
+                    if customers[cid-1]['demand_weight'] <= vtype.cap_weight and \
+                       customers[cid-1]['demand_volume'] <= vtype.cap_volume:
                         routes.append({'vtype': vtype, 'customers': [cid]})
-                        # 不递减 available，因为我们突破限制，但会由评估罚款处理
                         break
                 else:
-                    # 彻底失败，强行用燃油3000，将在评估中产生 inf（但 must_electric 的 tw_fuel 是 -1，所以会 inf）
                     routes.append({'vtype': VEHICLE_TYPES[0], 'customers': [cid]})
 
-    # 将之前移出的必须电动客户加回 unassigned 吗？不，它们已分配，unassigned 中应不包含它们
-    # unassigned 已经移除了 must_electric，但还需包含未处理的普通客户
-    # 注意原循环中我们直接从 unassigned 移除了 must_electric，剩余 unassigned 是普通客户
-
-    # 常规贪心构造剩余客户（与之前相同，但使用原始时间窗评估）
-    order = [3, 0, 1, 4, 2]  # 车型顺序
+    # 常规贪心构造
+    order = [3, 0, 1, 4, 2]
     while unassigned:
         best_route = None
         best_cost = float('inf')
         best_vtype = None
         for tid in order:
-            if available[tid] <= 0:  # 注意 available 可能被电动已用，所以改为 <= 0
+            if available[tid] <= 0:
                 continue
             vtype = VEHICLE_TYPES[tid]
             route_custs = []
@@ -128,15 +117,16 @@ def construct_initial_solution(customers, dist):
                 best_insert = None
                 best_insert_cost = float('inf')
                 for c in remaining:
-                    cust = customers[c - 1]
+                    cust = customers[c-1]
                     if not _can_serve(vtype, cust):
                         continue
-                    w = sum(customers[i - 1]['demand_weight'] for i in route_custs) + cust['demand_weight']
-                    vol = sum(customers[i - 1]['demand_volume'] for i in route_custs) + cust['demand_volume']
+                    w = sum(customers[i-1]['demand_weight'] for i in route_custs) + cust['demand_weight']
+                    vol = sum(customers[i-1]['demand_volume'] for i in route_custs) + cust['demand_volume']
                     if w > vtype.cap_weight or vol > vtype.cap_volume:
                         continue
                     temp_route = route_custs + [c]
-                    cost, _ = evaluate_route(temp_route, vtype, 0.0, customers, dist)
+                    dep = heuristic_departure(temp_route, vtype, customers, dist)
+                    cost, _ = evaluate_route(temp_route, vtype, dep, customers, dist)
                     if cost < best_insert_cost:
                         best_insert_cost = cost
                         best_insert = c
@@ -146,7 +136,8 @@ def construct_initial_solution(customers, dist):
                 else:
                     break
             if route_custs:
-                cost, _ = evaluate_route(route_custs, vtype, 0.0, customers, dist)
+                dep = heuristic_departure(route_custs, vtype, customers, dist)
+                cost, _ = evaluate_route(route_custs, vtype, dep, customers, dist)
                 if cost < best_cost:
                     best_cost = cost
                     best_route = route_custs
@@ -157,23 +148,22 @@ def construct_initial_solution(customers, dist):
         unassigned -= set(best_route)
         available[best_vtype.id] -= 1
 
-    # 如果还剩余普通客户，则采用单客户路径后备
+    # 后备
     if unassigned:
         print(f"警告: 贪心构造后有 {len(unassigned)} 个客户未分配，使用单客户路径后备。")
         for c in unassigned:
             assigned = False
             for tid in order:
                 vtype = VEHICLE_TYPES[tid]
-                if _can_serve(vtype, customers[c - 1]) and \
-                        customers[c - 1]['demand_weight'] <= vtype.cap_weight and \
-                        customers[c - 1]['demand_volume'] <= vtype.cap_volume:
+                if _can_serve(vtype, customers[c-1]) and \
+                   customers[c-1]['demand_weight'] <= vtype.cap_weight and \
+                   customers[c-1]['demand_volume'] <= vtype.cap_volume:
                     routes.append({'vtype': vtype, 'customers': [c]})
                     assigned = True
                     break
             if not assigned:
-                # 实在不行，用电动 3000 新建，可能数量超限，但由评估惩罚处理
-                vtype = VEHICLE_TYPES[3] if customers[c - 1]['demand_weight'] <= 3000 and \
-                                            customers[c - 1]['demand_volume'] <= 15.0 else VEHICLE_TYPES[0]
+                vtype = VEHICLE_TYPES[3] if customers[c-1]['demand_weight'] <= 3000 and \
+                        customers[c-1]['demand_volume'] <= 15.0 else VEHICLE_TYPES[0]
                 routes.append({'vtype': vtype, 'customers': [c]})
     return routes
 

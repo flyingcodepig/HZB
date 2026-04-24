@@ -31,7 +31,7 @@ def print_solution(routes, customers, dist):
         total_carbon += detail['carbon_cost']
         total_penalty += detail['penalty_cost']
 
-        print(f"\n车辆 {i+1}: {vtype.name} (载重{vtype.cap_weight}kg, 容积{vtype.cap_volume}m³)")
+        print(f"\n车辆 {i+1}: {vtype.name} (载重{vtype.cap_weight}kg, 容积{vtype.cap_volume}m^3)")
         print(f"  出发时间: {format_time(detail['departure_time'])}")
         print(f"  路径: 配送中心 -> " + " -> ".join(str(c) for c in custs) + " -> 配送中心")
         print("  到达时刻:")

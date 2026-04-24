@@ -13,16 +13,12 @@ from config import (
 )
 
 def time_str_to_hour(t_str):
-    """ 'HH:MM' -> 相对8:00的小时 """
     parts = t_str.strip().split(':')
     h, m = int(parts[0]), int(parts[1])
     return h + m/60.0 - START_EARLIEST
 
 def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
                         problem_id=1, save_cleaned_path=None):
-    """
-    problem_id: 1 = 无政策限制, 2 = 绿色配送区限行
-    """
     # 1. 订单汇总
     df_order = pd.read_excel(order_path, sheet_name=0)
     df_order['重量'] = df_order['重量'].fillna(0)
@@ -62,24 +58,32 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
             'service_time': SERVICE_TIME
         })
 
-    # 6. 拆分超大客户
+    # 6. 按比例拆分超大客户
     customers = []
     for cust in raw_customers:
-        sw, sv = cust['demand_weight'], cust['demand_volume']
-        suffix = 0
-        while sw > 1e-6 or sv > 1e-6:
-            move_w = min(MAX_WEIGHT, sw)
-            move_v = min(MAX_VOLUME, sv)
-            if sw <= 1e-6: move_w = 0
-            if sv <= 1e-6: move_v = 0
+        w = cust['demand_weight']
+        v = cust['demand_volume']
+        if w <= 1e-6 and v <= 1e-6:
+            # 无需求，但保留一个副本（可选，或跳过）
+            # 此处保留原始客户但不上传需求（后续可以忽略）
             new_cust = deepcopy(cust)
-            new_cust['demand_weight'] = move_w
-            new_cust['demand_volume'] = move_v
-            suffix += 1
-            new_cust['id'] = f"{cust['original_id']}_{suffix}"
+            new_cust['demand_weight'] = 0.0
+            new_cust['demand_volume'] = 0.0
+            new_cust['id'] = f"{cust['original_id']}_1"
             customers.append(new_cust)
-            sw -= move_w
-            sv -= move_v
+            continue
+
+        k_w = math.ceil(w / MAX_WEIGHT) if w > 0 else 1
+        k_v = math.ceil(v / MAX_VOLUME) if v > 0 else 1
+        k = max(k_w, k_v)
+        sub_w = w / k
+        sub_v = v / k
+        for i in range(1, k+1):
+            new_cust = deepcopy(cust)
+            new_cust['demand_weight'] = sub_w
+            new_cust['demand_volume'] = sub_v
+            new_cust['id'] = f"{cust['original_id']}_{i}"
+            customers.append(new_cust)
 
     # 7. 分配整数 node_id，扩展距离矩阵
     N = len(customers) + 1
@@ -100,27 +104,20 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
     # 构建最终客户列表，添加双时间窗和绿色区标识
     final_customers = []
     for c in customers:
-        # 坐标
         x, y = c['x'], c['y']
-        # 绿色区判定
         dist_to_center = math.hypot(x - GREEN_ZONE_CENTER[0], y - GREEN_ZONE_CENTER[1])
         is_green = dist_to_center <= GREEN_ZONE_RADIUS
-        # 原始时间窗
         orig_ready = c['ready_time']
         orig_due = c['due_time']
 
-        # 新能源车时间窗（始终为原始）
         tw_elec = (orig_ready, orig_due)
-
-        # 燃油车时间窗
         if problem_id == 2 and is_green:
-            # 交集：[max(ready, RESTRICTED_END), due]
             fuel_ready = max(orig_ready, RESTRICTED_END)
             fuel_due = orig_due
             if fuel_ready <= fuel_due:
                 tw_fuel = (fuel_ready, fuel_due)
             else:
-                tw_fuel = (-1.0, -1.0)   # 不可服务标记
+                tw_fuel = (-1.0, -1.0)   # 燃油车不可服务
         else:
             tw_fuel = (orig_ready, orig_due)
 
@@ -130,7 +127,7 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
             'x': x, 'y': y,
             'demand_weight': c['demand_weight'],
             'demand_volume': c['demand_volume'],
-            'ready_time': orig_ready,      # 保留原始时间窗（新能源车默认）
+            'ready_time': orig_ready,
             'due_time': orig_due,
             'tw_fuel': tw_fuel,
             'tw_elec': tw_elec,
@@ -158,7 +155,6 @@ def load_and_preprocess(order_path, dist_path, coord_path, tw_path,
                 'service_time_h': c['service_time'],
                 'is_green_zone': c['is_green_zone']
             })
-        # 配送中心
         data_for_export.append({
             'node_id': 0,
             'original_id': 0,
